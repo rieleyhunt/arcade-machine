@@ -35,13 +35,41 @@ useradd --home-dir / --no-create-home --system --shell /bin/nologin greeter
 useradd --create-home --shell /usr/bin/fish arcade
 
 ### Install RetroArch
+#
+# Built from source: the pinned upstream commit with retroarch/*.patch
+# applied (ScreenScraper game media, XMB game backgrounds). The patches
+# are made against this commit, so bump both together.
 
-curl -O https://buildbot.libretro.com/nightly/linux/x86_64/RetroArch.7z
+RETROARCH_COMMIT=7ef299dd3c851e6b87db4a376e4ce55b66e8f7fb
 
-dnf5 install -y p7zip
-7z x RetroArch.7z -o/opt/RetroArch
-dnf5 remove p7zip
+dnf5 install -y \
+    gcc gcc-c++ make git pkgconf-pkg-config \
+    mesa-libGL-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel \
+    vulkan-headers vulkan-loader-devel \
+    libX11-devel libXext-devel libXxf86vm-devel libXrandr-devel libXinerama-devel \
+    libxkbcommon-devel wayland-devel wayland-protocols-devel \
+    alsa-lib-devel pulseaudio-libs-devel pipewire-devel \
+    systemd-devel freetype-devel zlib-ng-compat-devel
 
-mv /opt/RetroArch/RetroArch-Linux-x86_64/RetroArch-Linux-x86_64.AppImage /opt/RetroArch/RetroArch.AppImage
-mv /opt/RetroArch/RetroArch-Linux-x86_64/RetroArch-Linux-x86_64.AppImage.home /opt/RetroArch/RetroArch.AppImage.home
-rm -d /opt/RetroArch/RetroArch-Linux-x86_64
+git init /tmp/retroarch
+git -C /tmp/retroarch fetch --depth 1 https://github.com/libretro/RetroArch.git "$RETROARCH_COMMIT"
+git -C /tmp/retroarch checkout FETCH_HEAD
+git -C /tmp/retroarch apply /ctx/retroarch/*.patch
+
+# Menu icons and fonts, installed to /usr/share/retroarch/assets
+git clone --depth 1 https://github.com/libretro/retroarch-assets.git /tmp/retroarch/media/assets
+
+cd /tmp/retroarch
+./configure --prefix=/usr --disable-qt --disable-ffmpeg
+make -j"$(nproc)"
+make install HAVE_ASSETS=1
+cd /
+rm -rf /tmp/retroarch
+
+dnf5 remove -y gcc gcc-c++
+
+# Existing cabinets launch /opt/RetroArch/RetroArch.AppImage (in /var, so
+# image updates never touch it or the saves beside it); this switches
+# that path to the build above at boot, keeping the AppImage as a backup.
+chmod 755 /usr/bin/arcade-retroarch /usr/libexec/arcade/retroarch-switch
+systemctl enable arcade-retroarch-switch.service

@@ -1,0 +1,5 @@
+# Patches must keep their exact bytes for git apply
+build_files/retroarch/*.patch -text
+# Scripts run on Linux; keep Unix line endings even in Windows checkouts
+*.sh text eol=lf
+system_files/** text eol=lf

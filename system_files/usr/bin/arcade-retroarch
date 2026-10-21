@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs this image's RetroArch with the data folder the old AppImage used
+# (the AppImage runtime pointed HOME there), so the existing settings,
+# saves, playlists and cores are picked up where they are.
+DATA_HOME=/opt/RetroArch/RetroArch.AppImage.home
+
+if [ -d "$DATA_HOME" ]; then
+   export HOME="$DATA_HOME"
+fi
+
+exec /usr/bin/retroarch "$@"

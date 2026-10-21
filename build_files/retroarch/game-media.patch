@@ -1,0 +1,1773 @@
+diff --git a/Makefile.common b/Makefile.common
+index 80a36d52..a0e5841b 100644
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -2614,6 +2614,7 @@ ifeq ($(HAVE_NETWORKING), 1)
+           tasks/task_netplay_lan_scan.o \
+           tasks/task_netplay_nat_traversal.o \
+ 	  tasks/task_pl_thumbnail_download.o \
++          tasks/task_screenscraper.o \
+           tasks/task_netplay_find_content.o
+ 
+    ifeq ($(HAVE_EMSCRIPTEN), 1)
+diff --git a/configuration.c b/configuration.c
+index 0298b7d6..44b214d4 100644
+--- a/configuration.c
++++ b/configuration.c
+@@ -1083,6 +1083,10 @@ static const char *config_sensitive_keys[] = {
+    "kick_stream_key",
+    "smb_client_username",
+    "smb_client_password",
++   "screenscraper_devid",
++   "screenscraper_devpassword",
++   "screenscraper_username",
++   "screenscraper_password",
+    "mcp_server_token",
+    "netplay_password",
+    "netplay_spectate_password",
+@@ -2021,6 +2025,10 @@ static struct config_array_setting *populate_settings_array(
+    SETTING_ARRAY_SENSITIVE("secret_access_key",           settings->arrays.secret_access_key, false, NULL, true);
+ #endif
+ #endif
++   SETTING_ARRAY_SENSITIVE("screenscraper_devid",         settings->arrays.screenscraper_devid, false, NULL, true);
++   SETTING_ARRAY_SENSITIVE("screenscraper_devpassword",   settings->arrays.screenscraper_devpassword, false, NULL, true);
++   SETTING_ARRAY_SENSITIVE("screenscraper_username",      settings->arrays.screenscraper_username, false, NULL, true);
++   SETTING_ARRAY_SENSITIVE("screenscraper_password",      settings->arrays.screenscraper_password, false, NULL, true);
+    SETTING_ARRAY_SENSITIVE("youtube_stream_key",          settings->arrays.youtube_stream_key, true, NULL, true);
+    SETTING_ARRAY_SENSITIVE("twitch_stream_key",           settings->arrays.twitch_stream_key, true, NULL, true);
+    SETTING_ARRAY_SENSITIVE("facebook_stream_key",         settings->arrays.facebook_stream_key, true, NULL, true);
+diff --git a/configuration.h b/configuration.h
+index 7faaa45e..090b72d4 100644
+--- a/configuration.h
++++ b/configuration.h
+@@ -1327,6 +1327,10 @@ typedef struct settings
+       char secret_access_key[186]; /* TODO/RESEARCH - check size, ex https://github.com/winscp/winscp/pull/15/files */
+ #endif
+ #endif
++      char screenscraper_devid[NAME_MAX_LENGTH];
++      char screenscraper_devpassword[NAME_MAX_LENGTH];
++      char screenscraper_username[NAME_MAX_LENGTH];
++      char screenscraper_password[NAME_MAX_LENGTH];
+ #endif
+ 
+       char crt_switch_timings[NAME_MAX_LENGTH];
+diff --git a/gfx/gfx_thumbnail.c b/gfx/gfx_thumbnail.c
+index 906f446d..545e910b 100644
+--- a/gfx/gfx_thumbnail.c
++++ b/gfx/gfx_thumbnail.c
+@@ -3320,6 +3320,41 @@ size_t gfx_thumbnail_get_content_dir(gfx_thumbnail_path_data_t *path_data,
+    return strlcpy(s, path_basename_nocompression(tmp_buf), len);
+ }
+ 
++size_t gfx_thumbnail_get_media_path(gfx_thumbnail_path_data_t *path_data,
++      const char *dir_thumbnails, const char *sub_dir, const char *ext,
++      char *s, size_t len)
++{
++   char system_dir[NAME_MAX_LENGTH];
++   char tmp_buf[DIR_MAX_LENGTH];
++   size_t _len;
++
++   if (     !path_data
++         || !*path_data->content_img
++         || !dir_thumbnails || !*dir_thumbnails)
++      return 0;
++
++   if (*path_data->content_db_name)
++      strlcpy(system_dir, path_data->content_db_name, sizeof(system_dir));
++   else if (   !strcmp(path_data->system, "history")
++            || !strcmp(path_data->system, "favorites"))
++   {
++      if (!gfx_thumbnail_get_content_dir(path_data,
++               system_dir, sizeof(system_dir)))
++         return 0;
++   }
++   else if (*path_data->system)
++      strlcpy(system_dir, path_data->system, sizeof(system_dir));
++   else
++      return 0;
++
++   fill_pathname_join_special(s, dir_thumbnails, system_dir, len);
++   fill_pathname_join_special(tmp_buf, s, sub_dir, sizeof(tmp_buf));
++   fill_pathname_join_special(s, tmp_buf, path_data->content_img, len);
++   path_remove_extension(s);
++   _len = strlen(s);
++   return _len + strlcpy(s + _len, ext, len - _len);
++}
++
+ /* Gets the common savestate thumbnail path. */
+ void gfx_savestate_thumbnail_get_path(
+       char *s, size_t len,
+diff --git a/gfx/gfx_thumbnail.h b/gfx/gfx_thumbnail.h
+index e22d8632..28cec79b 100644
+--- a/gfx/gfx_thumbnail.h
++++ b/gfx/gfx_thumbnail.h
+@@ -165,6 +165,13 @@ bool gfx_thumbnail_update_path_cfg(gfx_thumbnail_path_data_t *path_data,
+  * Returns true if content directory is valid. */
+ size_t gfx_thumbnail_get_content_dir(gfx_thumbnail_path_data_t *path_data, char *s, size_t len);
+ 
++/* Fills 's' with '<dir_thumbnails>/<system>/<sub_dir>/<content_img>',
++ * the image extension replaced by 'ext' (e.g. ".txt").
++ * Returns length of 's', or 0 if the current content has no name. */
++size_t gfx_thumbnail_get_media_path(gfx_thumbnail_path_data_t *path_data,
++      const char *dir_thumbnails, const char *sub_dir, const char *ext,
++      char *s, size_t len);
++
+ /* Gets the common savestate thumbnail path. */
+ void gfx_savestate_thumbnail_get_path(char *s, size_t len, const char *state_name, int state_slot);
+ 
+diff --git a/griffin/griffin.c b/griffin/griffin.c
+index 86b241af..741e1a24 100644
+--- a/griffin/griffin.c
++++ b/griffin/griffin.c
+@@ -1621,6 +1621,7 @@ NETPLAY
+ #endif
+ #include "../tasks/task_netplay_find_content.c"
+ #include "../tasks/task_pl_thumbnail_download.c"
++#include "../tasks/task_screenscraper.c"
+ #endif
+ 
+ /*============================================================
+diff --git a/intl/msg_hash_us.h b/intl/msg_hash_us.h
+index 3c3090a5..6a0075cb 100644
+--- a/intl/msg_hash_us.h
++++ b/intl/msg_hash_us.h
+@@ -32460,6 +32460,30 @@ MSG_HASH(
+    MSG_FAILED_TO_CREATE_THE_DIRECTORY,
+    "Failed to create the directory."
+    )
++MSG_HASH(
++   MSG_SCREENSCRAPER_FETCHING,
++   "Fetching Game Media"
++   )
++MSG_HASH(
++   MSG_SCREENSCRAPER_DONE,
++   "Game media found for %u of %u games."
++   )
++MSG_HASH(
++   MSG_SCREENSCRAPER_NO_CREDENTIALS,
++   "Set the ScreenScraper developer ID and password in Settings > Playlists first."
++   )
++MSG_HASH(
++   MSG_SCREENSCRAPER_LOGIN_FAILED,
++   "ScreenScraper rejected the developer ID or password."
++   )
++MSG_HASH(
++   MSG_SCREENSCRAPER_UNAVAILABLE,
++   "ScreenScraper is unavailable. Try again later."
++   )
++MSG_HASH(
++   MSG_SCREENSCRAPER_QUOTA,
++   "ScreenScraper daily limit reached. Try again tomorrow."
++   )
+ MSG_HASH(
+    MSG_FAILED_TO_EXTRACT_CONTENT_FROM_COMPRESSED_FILE,
+    "Failed to extract content from compressed file"
+diff --git a/menu/cbs/menu_cbs_ok.c b/menu/cbs/menu_cbs_ok.c
+index 433ff926..81c3ac23 100644
+--- a/menu/cbs/menu_cbs_ok.c
++++ b/menu/cbs/menu_cbs_ok.c
+@@ -9405,6 +9405,49 @@ static int action_ok_pl_content_thumbnails(const char *path,
+    return -1;
+ }
+ 
++static int action_ok_fetch_game_media(const char *path,
++      const char *label, unsigned type, size_t idx, size_t entry_idx)
++{
++   playlist_config_t playlist_config;
++   settings_t *settings = config_get_ptr();
++   const char *msg      = NULL;
++
++   if (!*settings->arrays.screenscraper_devid)
++      msg = msg_hash_to_str(MSG_SCREENSCRAPER_NO_CREDENTIALS);
++   else
++   {
++      memset(&playlist_config, 0, sizeof(playlist_config));
++      playlist_config.capacity            = COLLECTION_SIZE;
++      playlist_config.old_format          = settings->bools.playlist_use_old_format;
++      playlist_config.compress            = settings->bools.playlist_compression;
++      playlist_config.fuzzy_archive_match = settings->bools.playlist_fuzzy_archive_match;
++      playlist_config_set_base_content_directory(&playlist_config,
++            settings->bools.playlist_portable_paths
++            ? settings->paths.directory_menu_content : NULL);
++
++      /* Video previews are saved as .mp4 snaps, which play in the
++       * primary thumbnail slot */
++      configuration_set_bool(settings,
++            settings->bools.playlist_allow_non_png, true);
++      configuration_set_uint(settings,
++            settings->uints.gfx_thumbnails, 1);
++
++      if (!task_push_screenscraper_fetch(&playlist_config,
++               settings->paths.directory_playlist,
++               settings->paths.directory_thumbnails,
++               settings->arrays.screenscraper_devid,
++               settings->arrays.screenscraper_devpassword,
++               settings->arrays.screenscraper_username,
++               settings->arrays.screenscraper_password))
++         msg = msg_hash_to_str(MSG_SCREENSCRAPER_FETCHING);
++   }
++
++   if (msg)
++      runloop_msg_queue_push(msg, strlen(msg), 1, 180, true, NULL,
++            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
++   return 0;
++}
++
+ static int action_ok_pl_entry_content_thumbnails(const char *path,
+       const char *label, unsigned type, size_t idx, size_t entry_idx)
+ {
+@@ -9843,6 +9886,7 @@ static int menu_cbs_init_bind_ok_compare_label(menu_file_list_cbs_t *cbs,
+          {MENU_ENUM_LABEL_PLAYLIST_MANAGER_SORT_MODE,          action_ok_playlist_sort_mode},
+ #ifdef HAVE_NETWORKING
+          {MENU_ENUM_LABEL_UPDATE_CORE_INFO_FILES,              action_ok_update_core_info_files},
++         {MENU_ENUM_LABEL_FETCH_GAME_MEDIA,                    action_ok_fetch_game_media},
+          {MENU_ENUM_LABEL_UPDATE_OVERLAYS,                     action_ok_update_overlays},
+          {MENU_ENUM_LABEL_UPDATE_DATABASES,                    action_ok_update_databases},
+          {MENU_ENUM_LABEL_UPDATE_AUTOCONFIG_PROFILES,          action_ok_update_autoconfig_profiles},
+diff --git a/menu/cbs/menu_cbs_sublabel.c b/menu/cbs/menu_cbs_sublabel.c
+index d99ff695..ec828ecf 100644
+--- a/menu/cbs/menu_cbs_sublabel.c
++++ b/menu/cbs/menu_cbs_sublabel.c
+@@ -2599,6 +2599,11 @@ int menu_cbs_init_bind_sublabel(menu_file_list_cbs_t *cbs,
+       { MENU_ENUM_LABEL_INFORMATION_LIST, MENU_ENUM_SUBLABEL_INFORMATION_LIST_LIST },
+       { MENU_ENUM_LABEL_NETPLAY, MENU_ENUM_SUBLABEL_NETPLAY },
+       { MENU_ENUM_LABEL_ONLINE_UPDATER, MENU_ENUM_SUBLABEL_ONLINE_UPDATER },
++      { MENU_ENUM_LABEL_FETCH_GAME_MEDIA, MENU_ENUM_SUBLABEL_FETCH_GAME_MEDIA },
++      { MENU_ENUM_LABEL_SCREENSCRAPER_DEVID, MENU_ENUM_SUBLABEL_SCREENSCRAPER_DEVID },
++      { MENU_ENUM_LABEL_SCREENSCRAPER_DEVPASSWORD, MENU_ENUM_SUBLABEL_SCREENSCRAPER_DEVPASSWORD },
++      { MENU_ENUM_LABEL_SCREENSCRAPER_USERNAME, MENU_ENUM_SUBLABEL_SCREENSCRAPER_USERNAME },
++      { MENU_ENUM_LABEL_SCREENSCRAPER_PASSWORD, MENU_ENUM_SUBLABEL_SCREENSCRAPER_PASSWORD },
+       { MENU_ENUM_LABEL_UPDATER_SETTINGS, MENU_ENUM_SUBLABEL_UPDATER_SETTINGS },
+       { MENU_ENUM_LABEL_VIDEO_MAX_SWAPCHAIN_IMAGES, MENU_ENUM_SUBLABEL_VIDEO_MAX_SWAPCHAIN_IMAGES },
+       { MENU_ENUM_LABEL_VIDEO_WAITABLE_SWAPCHAINS, MENU_ENUM_SUBLABEL_VIDEO_WAITABLE_SWAPCHAINS },
+diff --git a/menu/drivers/ozone.c b/menu/drivers/ozone.c
+index 4c223010..058658b6 100644
+--- a/menu/drivers/ozone.c
++++ b/menu/drivers/ozone.c
+@@ -27,6 +27,7 @@
+ #endif
+ 
+ #include <file/file_path.h>
++#include <streams/file_stream.h>
+ #include <string/stdstring.h>
+ #include <encodings/utf.h>
+ #include <features/features_cpu.h>
+@@ -741,6 +742,8 @@ struct ozone_handle
+    char selection_lastplayed[NAME_MAX_LENGTH];
+    char selection_entry_enumeration[NAME_MAX_LENGTH];
+    char fullscreen_thumbnail_label[NAME_MAX_LENGTH];
++   char selection_description[2048];
++   char selection_description_path[PATH_MAX_LENGTH];
+ 
+    /* The menu font path the fonts are built from. ozone_render()
+     * watches it alongside the scale factors and rebuilds them in
+@@ -2188,6 +2191,7 @@ static uintptr_t ozone_entries_icon_get_texture(
+       case MENU_ENUM_LABEL_UPDATE_CHEATS:
+             return icons_tex[OZONE_ENTRIES_ICONS_TEXTURE_CHEAT_OPTIONS];
+       case MENU_ENUM_LABEL_PL_THUMBNAILS_UPDATER_LIST:
++      case MENU_ENUM_LABEL_FETCH_GAME_MEDIA:
+       case MENU_ENUM_LABEL_DEFERRED_PL_THUMBNAILS_UPDATER_LIST:
+       case MENU_ENUM_LABEL_DOWNLOAD_PL_ENTRY_THUMBNAILS:
+       case MENU_ENUM_LABEL_QUICK_MENU_SHOW_DOWNLOAD_THUMBNAILS:
+@@ -4569,6 +4573,41 @@ static void linebreak_after_colon(char (*str)[NAME_MAX_LENGTH])
+  * ozone_compute_entries_position(); the values arrive as arguments
+  * and each caller supplies them from its own context - the live
+  * settings on the main paths, the snapshot on the frame path. */
++/* Loads the fetched description of the selected content, if any */
++static void ozone_update_content_description(ozone_handle_t *ozone,
++      gfx_thumbnail_path_data_t *path_data)
++{
++   char path[PATH_MAX_LENGTH];
++   void *buf   = NULL;
++   int64_t len = 0;
++
++   path[0]     = '\0';
++   gfx_thumbnail_get_media_path(path_data,
++         config_get_ptr()->paths.directory_thumbnails,
++         "Named_Descriptions", ".txt", path, sizeof(path));
++
++   if (string_is_equal(path, ozone->selection_description_path))
++      return;
++   strlcpy(ozone->selection_description_path, path,
++         sizeof(ozone->selection_description_path));
++   ozone->selection_description[0] = '\0';
++
++   if (     !*path
++         || path_get_size(path) > (int64_t)sizeof(ozone->selection_description)
++         || !filestream_read_file(path, &buf, &len)
++         || !buf)
++      return;
++
++   (ozone->word_wrap)(ozone->selection_description,
++         sizeof(ozone->selection_description),
++         (const char*)buf, (size_t)len,
++         (ozone->dimensions.thumbnail_bar_width
++               - ((ozone->dimensions.sidebar_entry_icon_padding * 2) * 2))
++               / ozone->fonts.footer.glyph_width,
++         ozone->fonts.footer.wideglyph_width, 0);
++   free(buf);
++}
++
+ static void ozone_update_content_metadata(ozone_handle_t *ozone,
+       bool content_runtime_log, bool content_runtime_log_aggregate,
+       bool scroll_content_metadata, bool show_entry_idx)
+@@ -4778,6 +4817,13 @@ static void ozone_update_content_metadata(ozone_handle_t *ozone,
+       }
+       else
+          ozone->selection_lastplayed_lines = 1;
++
++      ozone_update_content_description(ozone, menu_st->thumbnail_path_data);
++   }
++   else
++   {
++      ozone->selection_description[0]      = '\0';
++      ozone->selection_description_path[0] = '\0';
+    }
+ }
+ 
+@@ -7136,6 +7182,11 @@ static void ozone_draw_thumbnail_bar(
+     *      content metadata override is not enabled
+     *   2) Content metadata */
+ 
++   if (     show_right_thumbnail
++         && *ozone->selection_description
++         && !(ozone->flags2 & OZONE_FLAG2_SELECTION_CORE_IS_VIEWER))
++      show_left_thumbnail = false;
++
+    /* > Get baseline 'start' position of bottom row */
+    bottom_row_y_position = ozone->dimensions.header_height
+          + ozone->dimensions.spacer_1px
+@@ -7306,7 +7357,39 @@ static void ozone_draw_thumbnail_bar(
+ 
+       y += 18 * scale_factor;
+ 
+-      if (scroll_content_metadata)
++      if (*ozone->selection_description)
++      {
++         char line[NAME_MAX_LENGTH];
++         const char *src = ozone->selection_description;
++
++         while (*src)
++         {
++            const char *end = strchr(src, '\n');
++            size_t _len     = end ? (size_t)(end - src) : strlen(src);
++
++            if (y + (unsigned)ozone->fonts.footer.line_height
++                  > video_height - ozone->dimensions.footer_height)
++               break;
++            strlcpy(line, src, MIN(_len + 1, sizeof(line)));
++            gfx_display_draw_text(
++                  ozone->fonts.footer.font,
++                  line,
++                  column_x,
++                  y + ozone->fonts.footer.line_ascender,
++                  video_dims,
++                  text_color,
++                  TEXT_ALIGN_LEFT,
++                  1.0f,
++                  false,
++                  1.0f,
++                  true);
++            y   += (unsigned)ozone->fonts.footer.line_height;
++            src += _len;
++            if (*src)
++               src++;
++         }
++      }
++      else if (scroll_content_metadata)
+       {
+          /* Entry enumeration */
+          if (show_entry_idx)
+diff --git a/menu/drivers/xmb.c b/menu/drivers/xmb.c
+index 10ad46f4..ddab8553 100644
+--- a/menu/drivers/xmb.c
++++ b/menu/drivers/xmb.c
+@@ -408,8 +408,11 @@ typedef struct xmb_handle
+       gfx_thumbnail_t left;
+       gfx_thumbnail_t icon;
+       gfx_thumbnail_t savestate;
++      /* Title screen of the selected game, drawn behind the menu */
++      gfx_thumbnail_t background;
+       enum xmb_pending_thumbnail_type pending;
+       enum xmb_pending_thumbnail_type pending_icons;
++      bool background_pending;
+    } thumbnails;
+ 
+    struct
+@@ -1981,6 +1984,9 @@ static void xmb_update_thumbnail_image(void *data)
+       gfx_thumbnail_reset(&xmb->thumbnails.right);
+       gfx_thumbnail_reset(&xmb->thumbnails.left);
+       gfx_thumbnail_reset(&xmb->thumbnails.icon);
++      gfx_thumbnail_reset(&xmb->thumbnails.background);
++      xmb->thumbnails.background_pending = xmb->is_playlist
++            || xmb->is_explore_list;
+    }
+ 
+    /* imageviewer content requires special treatment... */
+@@ -2064,6 +2070,8 @@ static void xmb_unload_thumbnail_textures(void *data)
+    gfx_thumbnail_reset(&xmb->thumbnails.left);
+    gfx_thumbnail_reset(&xmb->thumbnails.icon);
+    gfx_thumbnail_reset(&xmb->thumbnails.savestate);
++   gfx_thumbnail_reset(&xmb->thumbnails.background);
++   xmb->thumbnails.background_pending = false;
+ }
+ 
+ static void xmb_unload_icon_thumbnail_textures(void *xmb_handle_ptr)
+@@ -2563,6 +2571,8 @@ static void xmb_selection_pointer_changed(
+                gfx_thumbnail_reset(&xmb->thumbnails.right);
+                gfx_thumbnail_reset(&xmb->thumbnails.left);
+                gfx_thumbnail_reset(&xmb->thumbnails.icon);
++               gfx_thumbnail_reset(&xmb->thumbnails.background);
++               xmb->thumbnails.background_pending   = false;
+             }
+          }
+ 
+@@ -4230,6 +4240,8 @@ static void xmb_populate_entries(void *data,
+       gfx_thumbnail_reset(&xmb->thumbnails.right);
+       gfx_thumbnail_reset(&xmb->thumbnails.left);
+       gfx_thumbnail_reset(&xmb->thumbnails.icon);
++      gfx_thumbnail_reset(&xmb->thumbnails.background);
++      xmb->thumbnails.background_pending   = false;
+ 
+       xmb_set_thumbnail_content(xmb, "imageviewer");
+       xmb_update_thumbnail_image(xmb);
+@@ -4486,6 +4498,7 @@ static uintptr_t xmb_icon_get_id(xmb_handle_t *xmb,
+       case MENU_ENUM_LABEL_QUICK_MENU_SHOW_CHEATS:
+          return GFX_SURFACE_HANDLE(xmb->textures.list[XMB_TEXTURE_CHEAT_OPTIONS]);
+       case MENU_ENUM_LABEL_PL_THUMBNAILS_UPDATER_LIST:
++      case MENU_ENUM_LABEL_FETCH_GAME_MEDIA:
+       case MENU_ENUM_LABEL_DOWNLOAD_PL_ENTRY_THUMBNAILS:
+       case MENU_ENUM_LABEL_QUICK_MENU_SHOW_DOWNLOAD_THUMBNAILS:
+          return GFX_SURFACE_HANDLE(xmb->textures.list[XMB_TEXTURE_IMAGE]);
+@@ -7338,6 +7351,53 @@ static void xmb_context_reset_internal(xmb_handle_t *xmb,
+ }
+ 
+ 
++XMB_NOINLINE static void xmb_request_game_background(xmb_handle_t *xmb,
++      gfx_thumbnail_path_data_t *path_data, const char *dir_thumbnails,
++      unsigned upscale_threshold)
++{
++   char path[PATH_MAX_LENGTH];
++
++   xmb->thumbnails.background_pending = false;
++   if (     path_data
++         && !string_is_equal(path_data->content_core_name, "imageviewer")
++         && gfx_thumbnail_get_media_path(path_data, dir_thumbnails,
++            "Named_Titles", ".png", path, sizeof(path)))
++      gfx_thumbnail_request_file(path, &xmb->thumbnails.background,
++            upscale_threshold);
++}
++
++/* Fills the screen with the selected game's title screen,
++ * cropped to cover, then darkened so the menu stays readable */
++static void xmb_draw_game_background(xmb_handle_t *xmb,
++      void *userdata, gfx_display_t *p_disp, unsigned video_dims)
++{
++   float draw_w, draw_h, scale;
++   float dim_color[16]   = {
++      0.0f, 0.0f, 0.0f, 0.0f,
++      0.0f, 0.0f, 0.0f, 0.0f,
++      0.0f, 0.0f, 0.0f, 0.0f,
++      0.0f, 0.0f, 0.0f, 0.0f,
++   };
++   unsigned video_width  = VIDEO_SCALE_W(video_dims);
++   unsigned video_height = VIDEO_SCALE_H(video_dims);
++
++   gfx_thumbnail_get_draw_dimensions(&xmb->thumbnails.background,
++         video_dims, 1.0f, &draw_w, &draw_h);
++   if (draw_w < 1.0f || draw_h < 1.0f)
++      return;
++
++   scale = MAX((float)video_width / draw_w, (float)video_height / draw_h);
++
++   gfx_thumbnail_draw(userdata, video_dims, &xmb->thumbnails.background,
++         0.0f, 0.0f, video_dims, GFX_THUMBNAIL_ALIGN_CENTRE,
++         xmb->alpha, scale, NULL);
++
++   gfx_display_set_alpha(dim_color,
++         0.6f * xmb->alpha * xmb->thumbnails.background.alpha);
++   gfx_display_draw_quad(p_disp, userdata, video_dims,
++         0, 0, video_dims, video_dims, dim_color, NULL);
++}
++
+ static void xmb_render(void *data,
+       unsigned dims, bool is_idle)
+ {
+@@ -7379,6 +7439,8 @@ static void xmb_render(void *data,
+             menu_driver_get_current_time());
+    gfx_thumbnail_animate(&xmb->thumbnails.icon,
+             menu_driver_get_current_time());
++   gfx_thumbnail_animate(&xmb->thumbnails.background,
++            menu_driver_get_current_time());
+ 
+    /* Fire deferred dynamic-icon repopulate once input has settled.
+     * Set by xmb_populate_entries when it wanted to run the work but
+@@ -7922,6 +7984,14 @@ static void xmb_render(void *data,
+    GFX_ANIMATION_CLEAR_ACTIVE(p_anim);
+ 
+    /* The frame's thumbnail requests go out together */
++   /* Requested once the selection's own thumbnails are on their way,
++    * so scrolling past an entry does not decode its title screen */
++   if (     xmb->thumbnails.background_pending
++         && xmb->thumbnails.pending == XMB_PENDING_THUMBNAIL_NONE)
++      xmb_request_game_background(xmb, menu_st->thumbnail_path_data,
++            settings->paths.directory_thumbnails,
++            settings->uints.gfx_thumbnail_upscale_threshold);
++
+    gfx_thumbnail_flush_requests();
+ }
+ 
+@@ -8722,6 +8792,16 @@ static void xmb_frame(void *data, video_frame_info_t *video_info)
+             coord_black,
+             coord_white);
+ 
++   if (     dispctx
++         && !libretro_running
++         && (xmb->is_playlist || xmb->is_explore_list)
++         && xmb->thumbnails.background.status == GFX_THUMBNAIL_STATUS_AVAILABLE)
++   {
++      gfx_display_blend_begin(dispctx, userdata);
++      xmb_draw_game_background(xmb, userdata, p_disp, video_info->dims);
++      gfx_display_blend_end(dispctx, userdata);
++   }
++
+    selection = menu_st->selection_ptr;
+ 
+    if (dispctx && !dispctx->handles_transform)
+diff --git a/menu/menu_displaylist.c b/menu/menu_displaylist.c
+index 93b63d65..e575f953 100644
+--- a/menu/menu_displaylist.c
++++ b/menu/menu_displaylist.c
+@@ -9033,6 +9033,10 @@ unsigned menu_displaylist_build_list(
+             {
+ #ifdef HAVE_NETWORKING
+                {MENU_ENUM_LABEL_NETWORK_ON_DEMAND_THUMBNAILS,        PARSE_ONLY_BOOL, true},
++               {MENU_ENUM_LABEL_SCREENSCRAPER_DEVID,                 PARSE_ONLY_STRING, true},
++               {MENU_ENUM_LABEL_SCREENSCRAPER_DEVPASSWORD,           PARSE_ONLY_STRING, true},
++               {MENU_ENUM_LABEL_SCREENSCRAPER_USERNAME,              PARSE_ONLY_STRING, true},
++               {MENU_ENUM_LABEL_SCREENSCRAPER_PASSWORD,              PARSE_ONLY_STRING, true},
+ #endif
+                {MENU_ENUM_LABEL_PLAYLIST_USE_FILENAME,               PARSE_ONLY_BOOL, true},
+                {MENU_ENUM_LABEL_PLAYLIST_ALLOW_NON_PNG,              PARSE_ONLY_BOOL, true},
+@@ -17675,6 +17679,13 @@ static bool menu_displaylist_ctl_internal(
+                      count++;
+ #endif
+ 
++#ifdef HAVE_NETWORKING
++               if (MENU_DISPLAYLIST_PARSE_SETTINGS_ENUM(info->list,
++                        MENU_ENUM_LABEL_FETCH_GAME_MEDIA,
++                        PARSE_ACTION, false) == 0)
++                  count++;
++#endif
++
+                if (!count)
+                {
+                   menu_entries_clear(info->list);
+diff --git a/menu/menu_setting.c b/menu/menu_setting.c
+index 1d6effd1..711f073e 100644
+--- a/menu/menu_setting.c
++++ b/menu/menu_setting.c
+@@ -9704,6 +9704,18 @@ static size_t setting_get_string_representation_smb_password(
+ }
+ #endif
+ 
++#ifdef HAVE_NETWORKING
++static size_t setting_get_string_representation_masked(
++      rarch_setting_t *setting, char *s, size_t len)
++{
++   if (     setting
++         && setting->value.target.string
++         && *setting->value.target.string)
++      return strlcpy_lit(s, "********", len);
++   return 0;
++}
++#endif
++
+ /**
+  ******* ACTION OK CALLBACK FUNCTIONS *******
+ **/
+diff --git a/msg_hash.h b/msg_hash.h
+index 22c07f52..52caa83e 100644
+--- a/msg_hash.h
++++ b/msg_hash.h
+@@ -527,6 +527,12 @@ enum msg_hash_enums
+    MSG_ERROR_SAVING_SHADER_PRESET,
+    MSG_ERROR_REMOVING_SHADER_PRESET,
+    MSG_FAILED_TO_CREATE_THE_DIRECTORY,
++   MSG_SCREENSCRAPER_FETCHING,
++   MSG_SCREENSCRAPER_DONE,
++   MSG_SCREENSCRAPER_NO_CREDENTIALS,
++   MSG_SCREENSCRAPER_LOGIN_FAILED,
++   MSG_SCREENSCRAPER_UNAVAILABLE,
++   MSG_SCREENSCRAPER_QUOTA,
+    MSG_ERROR_SAVING_CORE_OPTIONS_FILE,
+    MSG_ERROR_REMOVING_CORE_OPTIONS_FILE,
+    MSG_CORE_OPTIONS_FILE_CREATED_SUCCESSFULLY,
+diff --git a/msg_hash_lbl_str.h b/msg_hash_lbl_str.h
+index ee9cfa49..f6d2eded 100644
+--- a/msg_hash_lbl_str.h
++++ b/msg_hash_lbl_str.h
+@@ -1161,6 +1161,7 @@
+ #define MENU_ENUM_LABEL_ENABLE_DEVICE_VIBRATION_STR "enable_device_vibration"
+ #define MENU_ENUM_LABEL_FASTFORWARD_FRAMESKIP_STR "fastforward_frameskip"
+ #define MENU_ENUM_LABEL_FASTFORWARD_RATIO_STR "fastforward_ratio"
++#define MENU_ENUM_LABEL_FETCH_GAME_MEDIA_STR "fetch_game_media"
+ #define MENU_ENUM_LABEL_FILTER_BY_CURRENT_CORE_STR "filter_by_current_Core"
+ #define MENU_ENUM_LABEL_FPS_SHOW_STR "fps_show"
+ #define MENU_ENUM_LABEL_FPS_UPDATE_INTERVAL_STR "fps_update_interval"
+@@ -1587,6 +1588,10 @@
+ #define MENU_ENUM_LABEL_SAVING_SETTINGS_STR "saving_settings"
+ #define MENU_ENUM_LABEL_SCAN_SERIAL_AND_CRC_STR "scan_serial_and_crc"
+ #define MENU_ENUM_LABEL_SCAN_WITHOUT_CORE_MATCH_STR "scan_without_core_match"
++#define MENU_ENUM_LABEL_SCREENSCRAPER_DEVID_STR "screenscraper_devid"
++#define MENU_ENUM_LABEL_SCREENSCRAPER_DEVPASSWORD_STR "screenscraper_devpassword"
++#define MENU_ENUM_LABEL_SCREENSCRAPER_PASSWORD_STR "screenscraper_password"
++#define MENU_ENUM_LABEL_SCREENSCRAPER_USERNAME_STR "screenscraper_username"
+ #define MENU_ENUM_LABEL_SCREENSHOT_DIRECTORY_STR "screenshot_directory"
+ #define MENU_ENUM_LABEL_SCREEN_ORIENTATION_STR "screen_orientation"
+ #define MENU_ENUM_LABEL_SCREEN_RESOLUTION_STR "screen_resolution"
+diff --git a/settings/settings_def_menu_main_actions_6.h b/settings/settings_def_menu_main_actions_6.h
+index b94aefa0..60a3d695 100644
+--- a/settings/settings_def_menu_main_actions_6.h
++++ b/settings/settings_def_menu_main_actions_6.h
+@@ -33,3 +33,9 @@ S_ACTION(SETTINGS,
+ S_ACTION_NS(INFORMATION_LIST,
+       "information_list",
+       "Information")
++#if defined(HAVE_NETWORKING) || defined(SETTINGS_DEF_STRINGS_PASS)
++S_ACTION(FETCH_GAME_MEDIA,
++      "fetch_game_media",
++      "Fetch Game Media",
++      "Download video previews, artwork and descriptions for every playlist from ScreenScraper.")
++#endif
+diff --git a/settings/settings_def_playlist_management.h b/settings/settings_def_playlist_management.h
+index d5c9a3dd..0d93c9bc 100644
+--- a/settings/settings_def_playlist_management.h
++++ b/settings/settings_def_playlist_management.h
+@@ -47,3 +47,51 @@ S_BOOL_EX(playlist_show_sublabels, PLAYLIST_SHOW_SUBLABELS,
+       DEFAULT_PLAYLIST_SHOW_SUBLABELS, SD_FLAG_NONE, 0, 0, setting_bool_action_left_with_refresh, NULL, NULL, NULL, setting_bool_action_left_with_refresh, setting_bool_action_right_with_refresh, 0,
+       "Show Playlist Sub-Labels",
+       "Show additional information for each playlist entry, such as current core association and runtime (if available). Has a variable performance impact.")
++/* Descriptor rows are #ifdef HAVE_NETWORKING; the string tables always
++ * carry this row via the strings pass.  The configuration.c row stays
++ * literal, as the key is sensitive. */
++#if defined(HAVE_NETWORKING) || defined(SETTINGS_DEF_STRINGS_PASS)
++#ifndef SETTINGS_DEF_CONFIG_PASS
++S_STRING(screenscraper_devid, SCREENSCRAPER_DEVID,
++      "screenscraper_devid",
++      "", SD_FLAG_ALLOW_INPUT, 0, NULL, NULL, setting_generic_action_start_default, NULL, NULL, NULL, ST_UI_TYPE_STRING_LINE_EDIT,
++      "ScreenScraper Developer ID",
++      "Developer ID issued by ScreenScraper, required by 'Fetch Game Media'.")
++#endif
++#endif
++/* Descriptor rows are #ifdef HAVE_NETWORKING; the string tables always
++ * carry this row via the strings pass.  The configuration.c row stays
++ * literal, as the key is sensitive. */
++#if defined(HAVE_NETWORKING) || defined(SETTINGS_DEF_STRINGS_PASS)
++#ifndef SETTINGS_DEF_CONFIG_PASS
++S_STRING(screenscraper_devpassword, SCREENSCRAPER_DEVPASSWORD,
++      "screenscraper_devpassword",
++      "", SD_FLAG_ALLOW_INPUT, 0, NULL, setting_get_string_representation_masked, setting_generic_action_start_default, NULL, NULL, NULL, ST_UI_TYPE_PASSWORD_LINE_EDIT,
++      "ScreenScraper Developer Password",
++      "Developer password issued by ScreenScraper.")
++#endif
++#endif
++/* Descriptor rows are #ifdef HAVE_NETWORKING; the string tables always
++ * carry this row via the strings pass.  The configuration.c row stays
++ * literal, as the key is sensitive. */
++#if defined(HAVE_NETWORKING) || defined(SETTINGS_DEF_STRINGS_PASS)
++#ifndef SETTINGS_DEF_CONFIG_PASS
++S_STRING(screenscraper_username, SCREENSCRAPER_USERNAME,
++      "screenscraper_username",
++      "", SD_FLAG_ALLOW_INPUT, 0, NULL, NULL, setting_generic_action_start_default, NULL, NULL, NULL, ST_UI_TYPE_STRING_LINE_EDIT,
++      "ScreenScraper Username",
++      "Your ScreenScraper account. Optional, but raises the daily download limit.")
++#endif
++#endif
++/* Descriptor rows are #ifdef HAVE_NETWORKING; the string tables always
++ * carry this row via the strings pass.  The configuration.c row stays
++ * literal, as the key is sensitive. */
++#if defined(HAVE_NETWORKING) || defined(SETTINGS_DEF_STRINGS_PASS)
++#ifndef SETTINGS_DEF_CONFIG_PASS
++S_STRING(screenscraper_password, SCREENSCRAPER_PASSWORD,
++      "screenscraper_password",
++      "", SD_FLAG_ALLOW_INPUT, 0, NULL, setting_get_string_representation_masked, setting_generic_action_start_default, NULL, NULL, NULL, ST_UI_TYPE_PASSWORD_LINE_EDIT,
++      "ScreenScraper Password",
++      "Password for your ScreenScraper account.")
++#endif
++#endif
+diff --git a/tasks/task_screenscraper.c b/tasks/task_screenscraper.c
+new file mode 100644
+index 00000000..a41ad371
+--- /dev/null
++++ b/tasks/task_screenscraper.c
+@@ -0,0 +1,1049 @@
++/*  RetroArch - A frontend for libretro.
++ *
++ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
++ *  of the GNU General Public License as published by the Free Software Found-
++ *  ation, either version 3 of the License, or (at your option) any later version.
++ *
++ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
++ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
++ *  PURPOSE.  See the GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along with RetroArch.
++ *  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <string/stdstring.h>
++#include <file/file_path.h>
++#include <lists/dir_list.h>
++#include <lists/string_list.h>
++#include <streams/file_stream.h>
++#include <encodings/crc32.h>
++#include <formats/rjson.h>
++#include <net/net_http.h>
++#include <retro_atomic.h>
++
++#include "tasks_internal.h"
++#include "task_file_transfer.h"
++
++#include "../file_path_special.h"
++#include "../msg_hash.h"
++#include "../playlist.h"
++#include "../verbosity.h"
++#include "../gfx/gfx_thumbnail.h"
++
++#ifndef SCRAPER_API_URL
++#define SCRAPER_API_URL      "https://api.screenscraper.fr/api2/jeuInfos.php"
++#endif
++#define SCRAPER_SOFTNAME     "RetroArch"
++/* Larger content is identified by name and size alone */
++#define SCRAPER_HASH_MAX     (64 * 1024 * 1024)
++#define SCRAPER_HASH_CHUNK   (256 * 1024)
++#define SCRAPER_HTTP_PARK_USEC  1000000
++#define SCRAPER_RETRY_USEC      2000000
++#define SCRAPER_RETRY_MAX       5
++#define SCRAPER_URL_MAX         4096
++/* Containers deeper than this are of no interest */
++#define SCRAPER_JSON_DEPTH      8
++#define SCRAPER_KEY_LEN         24
++
++enum scraper_status
++{
++   SCRAPER_BEGIN = 0,
++   SCRAPER_NEXT_PLAYLIST,
++   SCRAPER_NEXT_ENTRY,
++   SCRAPER_HASH,
++   SCRAPER_QUERY,
++   SCRAPER_PARSE,
++   SCRAPER_DOWNLOAD,
++   SCRAPER_END
++};
++
++enum scraper_media
++{
++   SCRAPER_MEDIA_VIDEO = 0,
++   SCRAPER_MEDIA_SNAP,
++   SCRAPER_MEDIA_TITLE,
++   SCRAPER_MEDIA_BOX,
++   SCRAPER_MEDIA_LAST
++};
++
++typedef struct scraper_pick
++{
++   char *url;
++   int score;
++   char format[8];
++} scraper_pick_t;
++
++typedef struct scraper_handle
++{
++   char *dir_playlist;
++   char *dir_thumbnails;
++   char *devid;
++   char *devpassword;
++   char *ssid;
++   char *sspassword;
++   char *response;
++   size_t response_len;
++   char *synopsis;
++   struct string_list *playlists;
++   playlist_t *playlist;
++   gfx_thumbnail_path_data_t *path_data;
++   RFILE *hash_file;
++   retro_task_t *http_task;
++   scraper_pick_t picks[SCRAPER_MEDIA_LAST];
++   playlist_config_t playlist_config;
++   int64_t rom_size;
++   size_t playlist_idx;
++   size_t list_size;
++   size_t list_index;
++   retro_atomic_int_t http_done;
++   uint32_t ident;
++   uint32_t crc;
++   unsigned system_id;
++   unsigned found;
++   unsigned total;
++   unsigned retries;
++   unsigned media_idx;
++   int synopsis_score;
++   int http_status;
++   enum scraper_status status;
++   bool has_crc;
++   bool need_desc;
++   bool need_media[SCRAPER_MEDIA_LAST];
++   char rom_path[PATH_MAX_LENGTH];
++   /* Path scratch kept off the stack, which handlers share */
++   char scratch[PATH_MAX_LENGTH];
++   char error[NAME_MAX_LENGTH];
++} scraper_handle_t;
++
++typedef struct scraper_system
++{
++   const char *name;
++   unsigned id;
++} scraper_system_t;
++
++/* libretro database name -> ScreenScraper 'systemeid' */
++static const scraper_system_t scraper_systems[] = {
++   { "Nintendo - Game Boy Advance",                    12  },
++   { "Nintendo - Game Boy Color",                      10  },
++   { "Nintendo - Game Boy",                            9   },
++   { "Nintendo - Nintendo Entertainment System",       3   },
++   { "Nintendo - Family Computer Disk System",         106 },
++   { "Nintendo - Super Nintendo Entertainment System", 4   },
++   { "Nintendo - Satellaview",                         107 },
++   { "Nintendo - Sufami Turbo",                        108 },
++   { "Nintendo - Nintendo 64DD",                       122 },
++   { "Nintendo - Nintendo 64",                         14  },
++   { "Nintendo - Nintendo DS",                         15  },
++   { "Nintendo - Nintendo 3DS",                        17  },
++   { "Nintendo - GameCube",                            13  },
++   { "Nintendo - Wii U",                               18  },
++   { "Nintendo - Wii",                                 16  },
++   { "Nintendo - Virtual Boy",                         11  },
++   { "Nintendo - Pokemon Mini",                        211 },
++   { "Sega - Mega Drive - Genesis",                    1   },
++   { "Sega - Master System - Mark III",                2   },
++   { "Sega - Game Gear",                               21  },
++   { "Sega - 32X",                                     19  },
++   { "Sega - Mega-CD - Sega CD",                       20  },
++   { "Sega - Saturn",                                  22  },
++   { "Sega - Dreamcast",                               23  },
++   { "Sega - SG-1000",                                 109 },
++   { "Sega - PICO",                                    250 },
++   { "Sega - Naomi",                                   56  },
++   { "Atomiswave",                                     53  },
++   { "Sony - PlayStation Portable",                    61  },
++   { "Sony - PlayStation 2",                           58  },
++   { "Sony - PlayStation",                             57  },
++   { "NEC - PC Engine SuperGrafx",                     105 },
++   { "NEC - PC Engine CD - TurboGrafx-CD",             114 },
++   { "NEC - PC Engine - TurboGrafx 16",                31  },
++   { "NEC - PC-FX",                                    72  },
++   { "SNK - Neo Geo Pocket Color",                     82  },
++   { "SNK - Neo Geo Pocket",                           25  },
++   { "SNK - Neo Geo CD",                               70  },
++   { "SNK - Neo Geo",                                  142 },
++   { "Atari - 2600",                                   26  },
++   { "Atari - 5200",                                   40  },
++   { "Atari - 7800",                                   41  },
++   { "Atari - Jaguar",                                 27  },
++   { "Atari - Lynx",                                   28  },
++   { "Atari - ST",                                     42  },
++   { "Bandai - WonderSwan Color",                      46  },
++   { "Bandai - WonderSwan",                            45  },
++   { "Coleco - ColecoVision",                          48  },
++   { "Mattel - Intellivision",                         115 },
++   { "GCE - Vectrex",                                  102 },
++   { "Magnavox - Odyssey2",                            104 },
++   { "Commodore - Amiga",                              64  },
++   { "Commodore - 64",                                 66  },
++   { "Amstrad - CPC",                                  65  },
++   { "Microsoft - MSX2",                               116 },
++   { "Microsoft - MSX",                                113 },
++   { "Sinclair - ZX Spectrum",                         76  },
++   { "Sinclair - ZX 81",                               77  },
++   { "Watara - Supervision",                           207 },
++   { "TIC-80",                                         222 },
++   { "ScummVM",                                        123 },
++   { "DOS",                                            135 },
++   { "FBNeo - Arcade Games",                           75  },
++   { "FB Alpha - Arcade Games",                        75  },
++   { "MAME",                                           75  }
++};
++
++static const char *scraper_media_types[SCRAPER_MEDIA_LAST] = {
++   "video-normalized",
++   "ss",
++   "sstitle",
++   "box-2D"
++};
++
++static const char *scraper_media_dirs[SCRAPER_MEDIA_LAST] = {
++   "Named_Snaps",
++   "Named_Snaps",
++   "Named_Titles",
++   "Named_Boxarts"
++};
++
++static const char *scraper_regions[] = { "us", "wor", "eu", "ss", "jp" };
++
++/* Prefix match, so that e.g. every "MAME 2003-Plus" variant maps to MAME */
++static unsigned scraper_get_system_id(const char *name)
++{
++   size_t i;
++   if (!name || !*name)
++      return 0;
++   for (i = 0; i < ARRAY_SIZE(scraper_systems); i++)
++      if (!strncmp(name, scraper_systems[i].name,
++               strlen(scraper_systems[i].name)))
++         return scraper_systems[i].id;
++   return 0;
++}
++
++static int scraper_region_score(const char *region)
++{
++   size_t i;
++   for (i = 0; i < ARRAY_SIZE(scraper_regions); i++)
++      if (string_is_equal(region, scraper_regions[i]))
++         return (int)(ARRAY_SIZE(scraper_regions) - i) + 1;
++   return 1;
++}
++
++static void scraper_free_picks(scraper_handle_t *h)
++{
++   unsigned i;
++   for (i = 0; i < SCRAPER_MEDIA_LAST; i++)
++   {
++      free(h->picks[i].url);
++      h->picks[i].url       = NULL;
++      h->picks[i].score     = 0;
++      h->picks[i].format[0] = '\0';
++   }
++   free(h->synopsis);
++   h->synopsis       = NULL;
++   h->synopsis_score = 0;
++   free(h->response);
++   h->response       = NULL;
++   h->response_len   = 0;
++}
++
++/*****************/
++/* JSON response */
++/*****************/
++
++typedef struct scraper_json_ctx
++{
++   char *url;
++   char *text;
++   scraper_handle_t *h;
++   unsigned record_depth;
++   char container[SCRAPER_JSON_DEPTH + 1][SCRAPER_KEY_LEN];
++   char member[SCRAPER_JSON_DEPTH + 1][SCRAPER_KEY_LEN];
++   char type[SCRAPER_KEY_LEN];
++   char region[SCRAPER_KEY_LEN];
++   char format[8];
++} scraper_json_ctx_t;
++
++static void scraper_json_commit(scraper_json_ctx_t *ctx, unsigned depth)
++{
++   scraper_handle_t *h = ctx->h;
++
++   if (string_is_equal(ctx->container[depth], "synopsis"))
++   {
++      int score = string_is_equal(ctx->region, "en") ? 2 : 1;
++      if (ctx->text && score > h->synopsis_score)
++      {
++         free(h->synopsis);
++         h->synopsis       = ctx->text;
++         h->synopsis_score = score;
++         ctx->text         = NULL;
++      }
++   }
++   else if (ctx->url)
++   {
++      unsigned i;
++      int score = scraper_region_score(ctx->region);
++
++      for (i = 0; i < SCRAPER_MEDIA_LAST; i++)
++      {
++         int s = score;
++         if (i == SCRAPER_MEDIA_VIDEO)
++         {
++            /* Normalized clips are smaller and loop cleanly */
++            if (string_is_equal(ctx->type, "video"))
++               s = 1;
++            else if (string_is_equal(ctx->type, scraper_media_types[i]))
++               s = 2;
++            else
++               continue;
++         }
++         else if (!string_is_equal(ctx->type, scraper_media_types[i]))
++            continue;
++
++         if (s > h->picks[i].score)
++         {
++            free(h->picks[i].url);
++            h->picks[i].url   = ctx->url;
++            h->picks[i].score = s;
++            strlcpy(h->picks[i].format, ctx->format,
++                  sizeof(h->picks[i].format));
++            ctx->url          = NULL;
++         }
++         break;
++      }
++   }
++
++   free(ctx->url);
++   free(ctx->text);
++   ctx->url       = NULL;
++   ctx->text      = NULL;
++   ctx->type[0]   = '\0';
++   ctx->region[0] = '\0';
++   ctx->format[0] = '\0';
++}
++
++/* Collects synopsis and media records from response.jeu */
++static bool scraper_parse_response(scraper_handle_t *h)
++{
++   scraper_json_ctx_t *ctx;
++   rjson_t *json;
++   bool ok = false;
++
++   if (!h->response || !h->response_len)
++      return false;
++   if (!(json = rjson_open_buffer(h->response, h->response_len)))
++      return false;
++   if (!(ctx = (scraper_json_ctx_t*)calloc(1, sizeof(*ctx))))
++   {
++      rjson_free(json);
++      return false;
++   }
++
++   ctx->h = h;
++   rjson_set_options(json, RJSON_OPTION_ALLOW_UTF8BOM
++         | RJSON_OPTION_REPLACE_INVALID_ENCODING);
++
++   for (;;)
++   {
++      size_t _len;
++      const char *str;
++      unsigned depth;
++      enum rjson_type type = rjson_next(json);
++
++      if (type == RJSON_DONE)
++      {
++         ok = true;
++         break;
++      }
++      if (type == RJSON_ERROR)
++         break;
++
++      depth = rjson_get_context_depth(json);
++      if (depth > SCRAPER_JSON_DEPTH)
++         continue;
++
++      switch (type)
++      {
++         case RJSON_OBJECT:
++         case RJSON_ARRAY:
++            if (depth > 0)
++            {
++               /* An array element takes the array's name */
++               if (rjson_check_context(json, 2, RJSON_ARRAY, type)
++                     || (depth > 1 && *ctx->container[depth - 1]
++                        && !*ctx->member[depth - 1]))
++                  strlcpy(ctx->container[depth], ctx->container[depth - 1],
++                        sizeof(ctx->container[depth]));
++               else
++                  strlcpy(ctx->container[depth], ctx->member[depth - 1],
++                        sizeof(ctx->container[depth]));
++               ctx->member[depth][0] = '\0';
++            }
++            if (     type == RJSON_OBJECT
++                  && depth >= 3
++                  && string_is_equal(ctx->container[depth - 2], "jeu")
++                  && (   string_is_equal(ctx->container[depth], "medias")
++                      || string_is_equal(ctx->container[depth], "synopsis")))
++               ctx->record_depth = depth;
++            break;
++         case RJSON_OBJECT_END:
++            if (ctx->record_depth && depth + 1 == ctx->record_depth)
++            {
++               scraper_json_commit(ctx, ctx->record_depth);
++               ctx->record_depth = 0;
++            }
++            break;
++         case RJSON_STRING:
++            str = rjson_get_string(json, &_len);
++            if (rjson_get_context_type(json) != RJSON_OBJECT)
++               break;
++            if ((rjson_get_context_count(json) & 1) == 1)
++            {
++               strlcpy(ctx->member[depth], str, sizeof(ctx->member[depth]));
++               break;
++            }
++            if (!ctx->record_depth || depth != ctx->record_depth)
++               break;
++            if (string_is_equal(ctx->member[depth], "type"))
++               strlcpy(ctx->type, str, sizeof(ctx->type));
++            else if (string_is_equal(ctx->member[depth], "region")
++                  || string_is_equal(ctx->member[depth], "langue"))
++               strlcpy(ctx->region, str, sizeof(ctx->region));
++            else if (string_is_equal(ctx->member[depth], "format"))
++               strlcpy(ctx->format, str, sizeof(ctx->format));
++            else if (string_is_equal(ctx->member[depth], "url"))
++            {
++               free(ctx->url);
++               ctx->url = strldup(str, _len + 1);
++            }
++            else if (string_is_equal(ctx->member[depth], "text"))
++            {
++               free(ctx->text);
++               ctx->text = strldup(str, _len + 1);
++            }
++            break;
++         default:
++            break;
++      }
++   }
++
++   free(ctx->url);
++   free(ctx->text);
++   free(ctx);
++   rjson_free(json);
++   return ok;
++}
++
++/*********/
++/* HTTP  */
++/*********/
++
++static void cb_scraper_query(retro_task_t *task, void *task_data,
++      void *user_data, const char *err)
++{
++   http_transfer_data_t *data = (http_transfer_data_t*)task_data;
++   scraper_handle_t *h        = (scraper_handle_t*)user_data;
++
++   if (!h)
++      return;
++
++   h->http_status = data ? data->status : 0;
++   if (data && data->data && data->len && data->status == 200)
++   {
++      if ((h->response = (char*)malloc(data->len + 1)))
++      {
++         memcpy(h->response, data->data, data->len);
++         h->response[data->len] = '\0';
++         h->response_len        = data->len;
++      }
++   }
++
++   retro_atomic_store_release_int(&h->http_done, 1);
++   task_queue_wake(h->ident);
++}
++
++static void cb_scraper_download(retro_task_t *task, void *task_data,
++      void *user_data, const char *err)
++{
++   http_transfer_data_t *data = (http_transfer_data_t*)task_data;
++   file_transfer_t *transf    = (file_transfer_t*)user_data;
++   scraper_handle_t *h        = NULL;
++
++   if (!transf)
++      return;
++
++   if ((h = (scraper_handle_t*)transf->user_data))
++   {
++      retro_atomic_store_release_int(&h->http_done, 1);
++      task_queue_wake(h->ident);
++   }
++
++   if (err && *err)
++      RARCH_ERR("[Scraper] Download \"%s\" failed: %s\n", transf->path, err);
++   else if (!data || data->status != 200)
++      RARCH_ERR("[Scraper] Download \"%s\" failed: HTTP %d\n",
++            transf->path, data ? data->status : 0);
++   else
++      RARCH_LOG("[Scraper] Downloaded \"%s\".\n", transf->path);
++
++   free(transf);
++}
++
++/* The callbacks write into the handle, so it outlives any transfer
++ * still in flight - even when cancelled. */
++static bool scraper_http_pending(retro_task_t *task, scraper_handle_t *h,
++      retro_time_t park_usec)
++{
++   if (h->http_task && !retro_atomic_load_acquire_int(&h->http_done))
++   {
++      task_queue_park(task, park_usec);
++      return true;
++   }
++   h->http_task = NULL;
++   return false;
++}
++
++static size_t scraper_append_param(char *s, size_t len,
++      const char *key, const char *value)
++{
++   char *enc   = NULL;
++   size_t _len = strlen(s);
++
++   if (!value)
++      return _len;
++   net_http_urlencode(&enc, value);
++   if (!enc)
++      return _len;
++   _len += snprintf(s + _len, len - _len, "&%s=%s", key, enc);
++   free(enc);
++   return _len;
++}
++
++static bool scraper_push_query(scraper_handle_t *h)
++{
++   char num[24];
++   char *url = (char*)malloc(SCRAPER_URL_MAX);
++
++   if (!url)
++      return false;
++
++   snprintf(url, SCRAPER_URL_MAX, "%s?output=json", SCRAPER_API_URL);
++   scraper_append_param(url, SCRAPER_URL_MAX, "devid",       h->devid);
++   scraper_append_param(url, SCRAPER_URL_MAX, "devpassword", h->devpassword);
++   scraper_append_param(url, SCRAPER_URL_MAX, "softname",    SCRAPER_SOFTNAME);
++   if (*h->ssid)
++   {
++      scraper_append_param(url, SCRAPER_URL_MAX, "ssid",       h->ssid);
++      scraper_append_param(url, SCRAPER_URL_MAX, "sspassword", h->sspassword);
++   }
++   snprintf(num, sizeof(num), "%u", h->system_id);
++   scraper_append_param(url, SCRAPER_URL_MAX, "systemeid", num);
++   scraper_append_param(url, SCRAPER_URL_MAX, "romtype",   "rom");
++   scraper_append_param(url, SCRAPER_URL_MAX, "romnom",
++         path_basename_nocompression(h->rom_path));
++   snprintf(num, sizeof(num), "%lld", (long long)h->rom_size);
++   scraper_append_param(url, SCRAPER_URL_MAX, "romtaille", num);
++   if (h->has_crc)
++   {
++      snprintf(num, sizeof(num), "%08X", (unsigned)h->crc);
++      scraper_append_param(url, SCRAPER_URL_MAX, "crc", num);
++   }
++
++   h->http_status = 0;
++   retro_atomic_store_release_int(&h->http_done, 0);
++   h->http_task = (retro_task_t*)task_push_http_transfer(url, true, NULL,
++         cb_scraper_query, h);
++   free(url);
++
++   if (!h->http_task)
++   {
++      retro_atomic_store_release_int(&h->http_done, 1);
++      return false;
++   }
++   return true;
++}
++
++/* Creates the parent directory of 'path' */
++static bool scraper_mkdir_parent(char *path)
++{
++   bool ok;
++   char c;
++   char *slash = find_last_slash(path);
++   if (!slash)
++      return false;
++   c      = *slash;
++   *slash = '\0';
++   ok     = path_mkdir(path);
++   *slash = c;
++   return ok;
++}
++
++static bool scraper_push_download(scraper_handle_t *h, unsigned i)
++{
++   const char *ext;
++   file_transfer_t *transf;
++
++   ext = *h->picks[i].format ? h->picks[i].format
++      : (i == SCRAPER_MEDIA_VIDEO ? "mp4" : "png");
++
++   if (!(transf = (file_transfer_t*)calloc(1, sizeof(*transf))))
++      return false;
++
++   transf->enum_idx  = MSG_UNKNOWN;
++   transf->user_data = h;
++   if (!gfx_thumbnail_get_media_path(h->path_data, h->dir_thumbnails,
++            scraper_media_dirs[i], "", transf->path, sizeof(transf->path)))
++   {
++      free(transf);
++      return false;
++   }
++   strlcat(transf->path, ".", sizeof(transf->path));
++   strlcat(transf->path, ext, sizeof(transf->path));
++
++   if (!scraper_mkdir_parent(transf->path))
++   {
++      free(transf);
++      return false;
++   }
++
++   retro_atomic_store_release_int(&h->http_done, 0);
++   if (!(h->http_task = (retro_task_t*)task_push_http_download_file(
++         h->picks[i].url, transf->path, true, NULL,
++         cb_scraper_download, transf)))
++   {
++      retro_atomic_store_release_int(&h->http_done, 1);
++      free(transf);
++      return false;
++   }
++   return true;
++}
++
++/************/
++/* Entries  */
++/************/
++
++static bool scraper_media_exists(scraper_handle_t *h, const char *sub_dir,
++      const char *ext)
++{
++   return gfx_thumbnail_get_media_path(h->path_data, h->dir_thumbnails,
++         sub_dir, ext, h->scratch, sizeof(h->scratch))
++      && path_is_valid(h->scratch);
++}
++
++static void scraper_write_description(scraper_handle_t *h)
++{
++   if (     h->synopsis
++         && gfx_thumbnail_get_media_path(h->path_data, h->dir_thumbnails,
++            "Named_Descriptions", ".txt", h->scratch, sizeof(h->scratch))
++         && scraper_mkdir_parent(h->scratch))
++      filestream_write_file(h->scratch, h->synopsis, strlen(h->synopsis));
++}
++
++/* Decides what the current entry is missing; false skips it */
++static bool scraper_prepare_entry(scraper_handle_t *h)
++{
++   const struct playlist_entry *entry = NULL;
++   const char *delim;
++   bool have_snap;
++
++   playlist_get_index(h->playlist, h->list_index, &entry);
++   if (!entry || !entry->path || !*entry->path)
++      return false;
++
++   if (!gfx_thumbnail_set_content_playlist(h->path_data,
++            h->playlist, h->list_index))
++      return false;
++
++   h->system_id = scraper_get_system_id(h->path_data->content_db_name);
++   if (!h->system_id)
++      h->system_id = scraper_get_system_id(h->path_data->system);
++   if (!h->system_id)
++      return false;
++
++   have_snap = scraper_media_exists(h, "Named_Snaps", ".png")
++            || scraper_media_exists(h, "Named_Snaps", ".jpg")
++            || scraper_media_exists(h, "Named_Snaps", ".mp4");
++   h->need_media[SCRAPER_MEDIA_VIDEO] = !have_snap;
++   h->need_media[SCRAPER_MEDIA_SNAP]  = !have_snap;
++   h->need_media[SCRAPER_MEDIA_TITLE] =
++         !scraper_media_exists(h, "Named_Titles", ".png");
++   h->need_media[SCRAPER_MEDIA_BOX]   =
++         !scraper_media_exists(h, "Named_Boxarts", ".png");
++   h->need_desc                       =
++         !scraper_media_exists(h, "Named_Descriptions", ".txt");
++
++   if (     !h->need_media[SCRAPER_MEDIA_VIDEO]
++         && !h->need_media[SCRAPER_MEDIA_TITLE]
++         && !h->need_media[SCRAPER_MEDIA_BOX]
++         && !h->need_desc)
++      return false;
++
++   /* Content inside an archive is identified by the archive */
++   strlcpy(h->rom_path, entry->path, sizeof(h->rom_path));
++   if ((delim = path_get_archive_delim(h->rom_path)))
++      h->rom_path[delim - h->rom_path] = '\0';
++
++   if (!path_is_valid(h->rom_path))
++      return false;
++   h->rom_size = path_get_size(h->rom_path);
++
++   h->has_crc  = false;
++   if (     entry->crc32
++         && strlen(entry->crc32) >= 8
++         && strncmp(entry->crc32, "00000000", 8)
++         && strncmp(entry->crc32, "DETECT", 6)
++         && !delim)
++   {
++      h->crc     = (uint32_t)strtoul(entry->crc32, NULL, 16);
++      h->has_crc = (h->crc != 0);
++   }
++   return true;
++}
++
++static void scraper_fail(scraper_handle_t *h, enum msg_hash_enums msg)
++{
++   strlcpy(h->error, msg_hash_to_str(msg), sizeof(h->error));
++   h->status = SCRAPER_END;
++}
++
++/* Returns true once the current entry's query is done with */
++static bool scraper_handle_status(retro_task_t *task, scraper_handle_t *h)
++{
++   switch (h->http_status)
++   {
++      case 200:
++         h->status = SCRAPER_PARSE;
++         return true;
++      case 429:
++         /* Thread limit: back off and ask again */
++         if (h->retries++ < SCRAPER_RETRY_MAX)
++         {
++            h->status = SCRAPER_QUERY;
++            task_queue_park(task, SCRAPER_RETRY_USEC);
++            return false;
++         }
++         break;
++      case 403:
++         scraper_fail(h, MSG_SCREENSCRAPER_LOGIN_FAILED);
++         return true;
++      case 401:
++      case 423:
++      case 426:
++         scraper_fail(h, MSG_SCREENSCRAPER_UNAVAILABLE);
++         return true;
++      case 430:
++      case 431:
++         scraper_fail(h, MSG_SCREENSCRAPER_QUOTA);
++         return true;
++      case 0:
++         scraper_fail(h, MSG_SCREENSCRAPER_UNAVAILABLE);
++         return true;
++      default:
++         break;
++   }
++   RARCH_LOG("[Scraper] No match for \"%s\" (HTTP %d).\n",
++         h->rom_path, h->http_status);
++   h->list_index++;
++   h->status = SCRAPER_NEXT_ENTRY;
++   return true;
++}
++
++static void scraper_free_handle(scraper_handle_t *h)
++{
++   if (h->hash_file)
++      filestream_close(h->hash_file);
++   if (h->playlist)
++      playlist_free(h->playlist);
++   if (h->playlists)
++      string_list_free(h->playlists);
++   scraper_free_picks(h);
++   free(h->path_data);
++   free(h->dir_playlist);
++   free(h->dir_thumbnails);
++   free(h->devid);
++   free(h->devpassword);
++   free(h->ssid);
++   free(h->sspassword);
++   free(h);
++}
++
++static bool scraper_playlist_supported(const char *path)
++{
++   const char *name = path_basename_nocompression(path);
++   return   name
++         && !string_ends_with(name, "_history.lpl")
++         && !string_is_equal(name, FILE_PATH_CONTENT_FAVORITES);
++}
++
++static void task_screenscraper_handler(retro_task_t *task)
++{
++   uint8_t flg;
++   scraper_handle_t *h = NULL;
++
++   if (!task || !(h = (scraper_handle_t*)task->state))
++      goto task_finished;
++
++   flg = task_get_flags(task);
++   if ((flg & RETRO_TASK_FLG_CANCELLED) > 0)
++   {
++      if (scraper_http_pending(task, h, SCRAPER_HTTP_PARK_USEC))
++         return;
++      goto task_finished;
++   }
++
++   switch (h->status)
++   {
++      case SCRAPER_BEGIN:
++         if (!(h->path_data = gfx_thumbnail_path_init()))
++            goto task_finished;
++         h->playlists = dir_list_new(h->dir_playlist, "lpl",
++               false, false, false, false);
++         if (!h->playlists || !h->playlists->size)
++         {
++            h->status = SCRAPER_END;
++            break;
++         }
++         dir_list_sort(h->playlists, true);
++         h->playlist_idx = 0;
++         h->status       = SCRAPER_NEXT_PLAYLIST;
++         break;
++
++      case SCRAPER_NEXT_PLAYLIST:
++         if (h->playlist)
++         {
++            playlist_free(h->playlist);
++            h->playlist = NULL;
++         }
++         if (h->playlist_idx >= h->playlists->size)
++         {
++            h->status = SCRAPER_END;
++            break;
++         }
++         {
++            char system[NAME_MAX_LENGTH];
++            const char *path = h->playlists->elems[h->playlist_idx++].data;
++
++            if (!scraper_playlist_supported(path))
++               break;
++
++            playlist_config_set_path(&h->playlist_config, path);
++            if (!(h->playlist = playlist_init(&h->playlist_config)))
++               break;
++
++            strlcpy(system, path_basename_nocompression(path), sizeof(system));
++            path_remove_extension(system);
++            gfx_thumbnail_path_reset(h->path_data);
++            if (!gfx_thumbnail_set_system(h->path_data, system, h->playlist))
++               break;
++
++            h->list_size  = playlist_size(h->playlist);
++            h->list_index = 0;
++            h->status     = SCRAPER_NEXT_ENTRY;
++         }
++         break;
++
++      case SCRAPER_NEXT_ENTRY:
++         if (h->list_index >= h->list_size)
++         {
++            h->status = SCRAPER_NEXT_PLAYLIST;
++            break;
++         }
++         if (!scraper_prepare_entry(h))
++         {
++            h->list_index++;
++            break;
++         }
++
++         h->total++;
++         task_free_title(task);
++         task_set_title(task, strdup(h->path_data->content_label));
++         task_set_progress(task, (int8_t)((h->list_index * 100)
++               / (h->list_size ? h->list_size : 1)));
++
++         h->crc     = 0;
++         h->retries = 0;
++         if (     !h->has_crc
++               && h->rom_size > 0
++               && h->rom_size <= SCRAPER_HASH_MAX
++               && (h->hash_file = filestream_open(h->rom_path,
++                     RETRO_VFS_FILE_ACCESS_READ,
++                     RETRO_VFS_FILE_ACCESS_HINT_NONE)))
++            h->status = SCRAPER_HASH;
++         else
++            h->status = SCRAPER_QUERY;
++         break;
++
++      case SCRAPER_HASH:
++         {
++            nbio_budget_t b;
++            uint8_t *buf = (uint8_t*)malloc(SCRAPER_HASH_CHUNK);
++            bool eof     = (buf == NULL);
++
++            task_nbio_slice_open(&b);
++            while (!eof && task_nbio_slice_within_budget(&b, 0, 0))
++            {
++               int64_t rd = filestream_read(h->hash_file, buf,
++                     SCRAPER_HASH_CHUNK);
++               if (rd <= 0)
++                  eof = true;
++               else
++                  h->crc = encoding_crc32(h->crc, buf, (size_t)rd);
++            }
++            task_nbio_slice_close(&b);
++            free(buf);
++
++            if (eof)
++            {
++               filestream_close(h->hash_file);
++               h->hash_file = NULL;
++               h->has_crc   = true;
++               h->status    = SCRAPER_QUERY;
++            }
++         }
++         break;
++
++      case SCRAPER_QUERY:
++         if (scraper_http_pending(task, h, SCRAPER_HTTP_PARK_USEC))
++            break;
++         if (h->http_status)
++         {
++            /* Answer to the last request */
++            if (scraper_handle_status(task, h))
++               h->http_status = 0;
++            break;
++         }
++         scraper_free_picks(h);
++         if (!scraper_push_query(h))
++            scraper_fail(h, MSG_SCREENSCRAPER_UNAVAILABLE);
++         break;
++
++      case SCRAPER_PARSE:
++         if (!scraper_parse_response(h))
++         {
++            RARCH_ERR("[Scraper] Unreadable response for \"%s\".\n",
++                  h->rom_path);
++            h->list_index++;
++            h->status = SCRAPER_NEXT_ENTRY;
++            break;
++         }
++         h->found++;
++         if (h->need_desc)
++            scraper_write_description(h);
++         /* A still in Named_Snaps would hide the video */
++         if (h->picks[SCRAPER_MEDIA_VIDEO].url)
++            h->need_media[SCRAPER_MEDIA_SNAP] = false;
++         h->media_idx = 0;
++         h->status    = SCRAPER_DOWNLOAD;
++         break;
++
++      case SCRAPER_DOWNLOAD:
++         if (scraper_http_pending(task, h, SCRAPER_HTTP_PARK_USEC))
++            break;
++         while (     h->media_idx < SCRAPER_MEDIA_LAST
++                 && (   !h->need_media[h->media_idx]
++                     || !h->picks[h->media_idx].url))
++            h->media_idx++;
++         if (h->media_idx >= SCRAPER_MEDIA_LAST)
++         {
++            h->list_index++;
++            h->status = SCRAPER_NEXT_ENTRY;
++            break;
++         }
++         scraper_push_download(h, h->media_idx++);
++         break;
++
++      case SCRAPER_END:
++      default:
++         task_set_progress(task, 100);
++         task_free_title(task);
++         if (*h->error)
++         {
++            task_set_title(task, strdup(h->error));
++            task_set_error(task, strdup(h->error));
++         }
++         else
++         {
++            char msg[NAME_MAX_LENGTH];
++            snprintf(msg, sizeof(msg),
++                  msg_hash_to_str(MSG_SCREENSCRAPER_DONE),
++                  h->found, h->total);
++            task_set_title(task, strdup(msg));
++         }
++         goto task_finished;
++   }
++
++   return;
++
++task_finished:
++   if (task)
++      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   if (h)
++   {
++      task->state = NULL;
++      scraper_free_handle(h);
++   }
++}
++
++static bool task_screenscraper_finder(retro_task_t *task, void *user_data)
++{
++   return task && task->handler == task_screenscraper_handler;
++}
++
++bool task_push_screenscraper_fetch(
++      const playlist_config_t *playlist_config,
++      const char *dir_playlist,
++      const char *dir_thumbnails,
++      const char *devid,
++      const char *devpassword,
++      const char *ssid,
++      const char *sspassword)
++{
++   task_finder_data_t find_data;
++   retro_task_t *task   = NULL;
++   scraper_handle_t *h  = NULL;
++
++   if (     !playlist_config
++         || !dir_playlist   || !*dir_playlist
++         || !dir_thumbnails || !*dir_thumbnails
++         || !devid          || !*devid)
++      return false;
++
++   find_data.func     = task_screenscraper_finder;
++   find_data.userdata = NULL;
++   if (task_queue_find(&find_data))
++      return false;
++
++   if (!(task = task_init()))
++      return false;
++   if (!(h = (scraper_handle_t*)calloc(1, sizeof(*h))))
++   {
++      free(task);
++      return false;
++   }
++
++   playlist_config_copy(playlist_config, &h->playlist_config);
++   h->dir_playlist   = strdup(dir_playlist);
++   h->dir_thumbnails = strdup(dir_thumbnails);
++   h->devid          = strdup(devid);
++   h->devpassword    = strdup(devpassword ? devpassword : "");
++   h->ssid           = strdup(ssid        ? ssid        : "");
++   h->sspassword     = strdup(sspassword  ? sspassword  : "");
++   h->ident          = task->ident;
++   h->status         = SCRAPER_BEGIN;
++   retro_atomic_int_init(&h->http_done, 0);
++
++   task->handler     = task_screenscraper_handler;
++   task->state       = h;
++   task->title       = strdup(msg_hash_to_str(MSG_SCREENSCRAPER_FETCHING));
++   task->progress    = 0;
++   task->progress_cb = task_window_progress_cb;
++   task->flags      |= RETRO_TASK_FLG_ALTERNATIVE_LOOK;
++
++   task_queue_push(task);
++   return true;
++}
+diff --git a/tasks/tasks_internal.h b/tasks/tasks_internal.h
+index f458164b..38b0c6db 100644
+--- a/tasks/tasks_internal.h
++++ b/tasks/tasks_internal.h
+@@ -201,6 +201,15 @@ bool task_push_pl_entry_thumbnail_download(
+       bool overwrite,
+       bool mute);
+ 
++bool task_push_screenscraper_fetch(
++      const playlist_config_t *playlist_config,
++      const char *dir_playlist,
++      const char *dir_thumbnails,
++      const char *devid,
++      const char *devpassword,
++      const char *ssid,
++      const char *sspassword);
++
+ #ifdef HAVE_MENU
+ bool task_push_pl_thumbnail_download(
+       const char *system,

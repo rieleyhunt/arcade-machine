@@ -1,0 +1,12 @@
+[Unit]
+Description=Run this image's RetroArch from the old AppImage path
+ConditionPathExists=/opt/RetroArch/RetroArch.AppImage
+RequiresMountsFor=/var/opt
+Before=greetd.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/arcade/retroarch-switch
+
+[Install]
+WantedBy=multi-user.target

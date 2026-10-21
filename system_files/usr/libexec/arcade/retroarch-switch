@@ -1,0 +1,32 @@
+#!/bin/sh
+# Points the old AppImage path at this image's RetroArch, so whatever
+# launches RetroArch on the cabinet keeps working unchanged. The original
+# AppImage is kept as RetroArch.AppImage.backup.
+#
+# To go back: create /opt/RetroArch/keep-appimage, delete
+# RetroArch.AppImage and rename RetroArch.AppImage.backup to it.
+set -eu
+
+DIR=/opt/RetroArch
+APPIMAGE="$DIR/RetroArch.AppImage"
+BACKUP="$APPIMAGE.backup"
+
+[ -e "$DIR/keep-appimage" ] && exit 0
+[ -e "$APPIMAGE" ] || exit 0
+# Already switched, or switched back by hand
+[ -e "$BACKUP" ] && exit 0
+
+mv "$APPIMAGE" "$BACKUP"
+cat > "$APPIMAGE" <<'SHIM'
+#!/bin/sh
+# Runs this image's RetroArch; the original AppImage is
+# RetroArch.AppImage.backup, used if this image has no RetroArch
+# (for example after rolling back to an older image).
+if [ -x /usr/bin/arcade-retroarch ]; then
+   exec /usr/bin/arcade-retroarch "$@"
+fi
+HOME=/opt/RetroArch/RetroArch.AppImage.home
+export HOME
+exec /opt/RetroArch/RetroArch.AppImage.backup "$@"
+SHIM
+chmod 755 "$APPIMAGE"
